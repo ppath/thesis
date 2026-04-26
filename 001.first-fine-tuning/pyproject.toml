@@ -118,6 +118,10 @@ dependencies = [
 
     # `tqdm` — progress bars during training.
     "tqdm>=4.67.0",
+
+    # `tensorboard` — required because we set `report_to="tensorboard"`.
+    # Without it, the Trainer raises at construction time.
+    "tensorboard>=2.18.0",
 ]
 
 
@@ -143,4 +147,3 @@ explicit = true
 
 [tool.uv.sources]
 torch = { index = "pytorch-cu128" }
-
