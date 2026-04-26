@@ -1,0 +1,146 @@
+# ============================================================================
+# pyproject.toml — Fine-tuning TinyLlama with LoRA on a medical Q&A dataset
+# ============================================================================
+# All versions verified latest as of April 26, 2026.
+#
+# HOW TO INSTALL:
+#   1. (Recommended) Create a clean virtual environment first:
+#        python -m venv .venv
+#        source .venv/bin/activate        # on Linux / macOS
+#        .venv\Scripts\activate           # on Windows
+#      Or with uv:
+#        uv venv && source .venv/bin/activate
+#
+#   2. Then install:
+#        # With uv (recommended — honours [tool.uv.sources] below):
+#        uv sync
+#        # or:
+#        uv pip install -e .
+#
+#        # With pip — you must pass the extra index manually because
+#        # pip does not yet read [tool.uv.sources]:
+#        pip install -e . --extra-index-url https://download.pytorch.org/whl/cu128
+#
+# HOW TO RUN THE SCRIPT:
+#   - Single GPU:    python train.py
+#   - Multiple GPUs: torchrun --nproc_per_node=4 train.py   (4 = number of GPUs)
+#
+# HARDWARE TARGET:
+#   - GPU: NVIDIA H100 (Hopper, compute capability 9.0). Fully supported by
+#     all wheels below. Works on any GPU with compute capability >= 8.0.
+#   - CUDA driver: 12.9 on host. We install PyTorch wheels built for CUDA 12.8;
+#     cu128 wheels are compatible with libcuda >= 12.8, so a 12.9 driver is fine.
+#   - You do NOT need to install the CUDA toolkit yourself; the PyTorch wheel
+#     bundles all the CUDA libraries it needs (cuBLAS, cuDNN, NCCL, etc.).
+# ============================================================================
+
+[project]
+name = "tinyllama-medical-finetune"
+version = "0.1.0"
+description = "Fine-tune TinyLlama with LoRA on a medical Q&A dataset"
+requires-python = ">=3.10"
+
+dependencies = [
+    # ------------------------------------------------------------------------
+    # PyTorch — the deep-learning framework
+    # ------------------------------------------------------------------------
+    # 2.11.0 was released March 20, 2026 — current stable.
+    # Provides autograd, CUDA kernels, distributed training (NCCL), and the
+    # SDPA / FlashAttention attention implementations the script uses.
+    #
+    # The `+cu128` suffix is a "local version identifier" that uniquely
+    # identifies the CUDA 12.8 build. Without it, plain `torch==2.11.0` from
+    # PyPI would resolve to the cu130 wheel (PyTorch 2.11's PyPI default).
+    #
+    # Alternative for uv users: drop the `+cu128` and rely on
+    # [tool.uv.sources] below, or run:
+    #   uv pip install -e . --torch-backend=cu128
+    "torch==2.11.0+cu128",
+
+    # ------------------------------------------------------------------------
+    # Hugging Face stack — high-level libraries for LLM training
+    # ------------------------------------------------------------------------
+
+    # `transformers` — model architectures + AutoTokenizer/AutoModelForCausalLM.
+    # 5.6.2 (Apr 23, 2026) is the latest stable.
+    "transformers==5.6.2",
+
+    # `trl` — provides SFTTrainer/SFTConfig (the training engine in your script).
+    # 1.1.0 (Apr 12, 2026) is the first patch of the v1.0 stable line.
+    # NOTE: trl 1.1.0 requires datasets>=4.7.0 — kept in sync below.
+    "trl==1.1.0",
+
+    # `peft` — makes LoRA work. Freezes the base model and trains tiny "adapter"
+    # matrices (<1% of params) → far faster training and a tiny final artifact.
+    # 0.18.1 is the current stable.
+    "peft==0.18.1",
+
+    # `accelerate` — handles multi-GPU launching, mixed precision (bf16),
+    # gradient accumulation. Required by the Trainer even on a single GPU.
+    # 1.12.0 (Mar 4, 2026) is the latest stable.
+    "accelerate==1.12.0",
+
+    # `datasets` — efficient dataset loading/streaming/mapping (Arrow-backed).
+    # Loads `medalpaca/medical_meadow_medical_flashcards` from the Hub.
+    # Range chosen because trl 1.1.0 requires datasets>=4.7.0;
+    # upper bound prevents an unreleased 5.0 from silently breaking things.
+    "datasets>=4.7.0,<5.0",
+
+    # ------------------------------------------------------------------------
+    # Supporting libraries
+    # ------------------------------------------------------------------------
+
+    # `huggingface_hub` — talks to huggingface.co (downloads models/datasets,
+    # optional uploads). Note: this library hit 1.0 in 2026 (latest is 1.12.0),
+    # so a wide range is fine — transformers will pull a compatible version.
+    # TIP: for gated models, run `huggingface-cli login` (or `hf auth login`) once.
+    "huggingface_hub>=0.34.0",
+
+    # `safetensors` — fast, safe weights file format (replaces pickle/.bin).
+    # TinyLlama and most modern HF models ship in this format.
+    "safetensors>=0.5.0",
+
+    # `tokenizers` — Rust-backed text → tokens. Pinned to 0.22.x to match
+    # what transformers 5.x expects under the hood.
+    "tokenizers>=0.22.0,<0.23.0",
+
+    # `sentencepiece` — tokenizer algorithm used by LLaMA-family models
+    # (TinyLlama). Without it, AutoTokenizer can fail to load.
+    "sentencepiece>=0.2.0",
+
+    # `numpy` — fundamental array library used throughout the ML ecosystem.
+    # Capped <3 because some libraries haven't yet adapted to NumPy 3.
+    "numpy>=2.0,<3.0",
+
+    # `packaging` — version-parsing utilities. Many libs use it to do
+    # "is torch >= 2.5?" style runtime checks.
+    "packaging>=24.0",
+
+    # `tqdm` — progress bars during training.
+    "tqdm>=4.67.0",
+]
+
+
+# ============================================================================
+# uv-specific configuration
+# ============================================================================
+# Equivalent of `--extra-index-url https://download.pytorch.org/whl/cu128`
+# from requirements.txt, but expressed the modern uv way: declare the index
+# and pin `torch` to it explicitly. This avoids "index confusion" attacks
+# because uv only consults this index for packages routed to it.
+#
+# `explicit = true` means: do NOT search this index for arbitrary packages
+# — only for the ones that opt in via [tool.uv.sources] below.
+# ============================================================================
+
+[tool.uv]
+package = false   # 👈 the key line: don't try to build this project as a wheel
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+
