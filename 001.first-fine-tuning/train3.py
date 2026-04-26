@@ -187,7 +187,7 @@ sft_config = SFTConfig(
     bf16=True,
     bf16_full_eval=True,
 
-    max_seq_length=1024,
+    max_length=1024,
     # Train-time packing concatenates short samples up to 1024 tokens, killing
     # padding waste — big throughput win on this mostly-short dataset.
     # Eval is left unpacked so eval_loss has a stable per-example denominator,
