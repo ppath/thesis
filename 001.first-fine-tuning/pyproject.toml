@@ -28,6 +28,7 @@
 # HARDWARE TARGET:
 #   - GPU: NVIDIA H100 (Hopper, compute capability 9.0). Fully supported by
 #     all wheels below. Works on any GPU with compute capability >= 8.0.
+#     FlashAttention-3 specifically requires Hopper (sm_90) — perfect match.
 #   - CUDA driver: 12.9 on host. We install PyTorch wheels built for CUDA 12.8;
 #     cu128 wheels are compatible with libcuda >= 12.8, so a 12.9 driver is fine.
 #   - You do NOT need to install the CUDA toolkit yourself; the PyTorch wheel
@@ -58,16 +59,38 @@ dependencies = [
     "torch==2.11.0+cu128",
 
     # ------------------------------------------------------------------------
+    # FlashAttention 3 — fused attention kernels for Hopper (H100/H200)
+    # ------------------------------------------------------------------------
+    # FA3 is the successor to flash-attn 2 and is purpose-built for Hopper's
+    # WGMMA + TMA hardware. On H100 it is typically 1.5–2× faster than FA2 and
+    # uses dramatically less memory than dense SDPA, which is essential for
+    # TRL's `packing=True` / padding-free training mode (it concatenates the
+    # microbatch into one long sequence — without a varlen flash kernel, the
+    # attention score tensor becomes huge and OOMs).
+    #
+    # We pull the prebuilt wheel from the PyTorch cu128 index (see
+    # [tool.uv.sources] below) so we avoid the multi-minute source build that
+    # plain `flash-attn` from PyPI requires. The package on the index is
+    # named `flash-attn-3`; the import name in Python is `flash_attn_3`.
+    #
+    # In your training script, load the model with:
+    #     attn_implementation="flash_attention_3"
+    "flash-attn-3",
+
+    # ------------------------------------------------------------------------
     # Hugging Face stack — high-level libraries for LLM training
     # ------------------------------------------------------------------------
 
     # `transformers` — model architectures + AutoTokenizer/AutoModelForCausalLM.
-    # 5.6.2 (Apr 23, 2026) is the latest stable.
+    # 5.6.2 (Apr 23, 2026) is the latest stable. Recognises
+    # `attn_implementation="flash_attention_3"` for Llama-family models.
     "transformers==5.6.2",
 
     # `trl` — provides SFTTrainer/SFTConfig (the training engine in your script).
     # 1.1.0 (Apr 12, 2026) is the first patch of the v1.0 stable line.
     # NOTE: trl 1.1.0 requires datasets>=4.7.0 — kept in sync below.
+    # Its packing/padding-free path explicitly lists flash_attention_3 as a
+    # supported attention backend.
     "trl==1.1.0",
 
     # `peft` — makes LoRA work. Freezes the base model and trains tiny "adapter"
@@ -130,8 +153,9 @@ dependencies = [
 # ============================================================================
 # Equivalent of `--extra-index-url https://download.pytorch.org/whl/cu128`
 # from requirements.txt, but expressed the modern uv way: declare the index
-# and pin `torch` to it explicitly. This avoids "index confusion" attacks
-# because uv only consults this index for packages routed to it.
+# and pin `torch` (and flash-attn-3) to it explicitly. This avoids
+# "index confusion" attacks because uv only consults this index for packages
+# routed to it.
 #
 # `explicit = true` means: do NOT search this index for arbitrary packages
 # — only for the ones that opt in via [tool.uv.sources] below.
@@ -146,4 +170,5 @@ url = "https://download.pytorch.org/whl/cu128"
 explicit = true
 
 [tool.uv.sources]
-torch = { index = "pytorch-cu128" }
+torch        = { index = "pytorch-cu128" }
+flash-attn-3 = { index = "pytorch-cu128" }   # prebuilt FA3 wheel for cu128

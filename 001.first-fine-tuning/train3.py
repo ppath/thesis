@@ -134,7 +134,7 @@ log(f"Train: {len(train_ds)} | Eval: {len(eval_ds)}")
 model = AutoModelForCausalLM.from_pretrained(
     MODEL_ID,
     dtype=torch.bfloat16,         # bf16 is native on H100, no loss scaling needed.
-    attn_implementation="sdpa",   # PyTorch's fused attention, FlashAttention-2 backend on H100.
+    attn_implementation="flash_attention_3",   # PyTorch's fused attention, FlashAttention-2 backend on H100.
 )
 # KV-cache is for inference; disabling saves memory and silences a training warning.
 model.config.use_cache = False
