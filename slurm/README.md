@@ -1,83 +1,31 @@
 # SLURM Cluster — Setup README
 
-## Quick setup guide
+## Setup guide
 
-All commands below run on **`enif`** as a user with `sudo`. Replace `CHANGE_ME_STRONG_PASSWORD` everywhere before starting.
+Run `setup.sh` on **`enif`** as a user with `sudo`:
 
 ```bash
-# 1. Install packages (Ubuntu 22.04+; for RHEL use dnf equivalents)
-sudo apt update
-sudo apt install -y slurm-wlm slurmdbd munge slurm-wlm-basic-plugins \
-                    mariadb-server libpmix2
+# Optional: set the DB password in the environment to avoid the interactive prompt
+export SLURM_DB_PASS="<strong-password>"
 
-# 2. Create required directories with correct ownership
-sudo mkdir -p /var/spool/slurmctld /var/spool/slurmd /var/log/slurm
-sudo chown -R slurm:slurm /var/spool/slurmctld /var/log/slurm
-sudo chown -R root:root  /var/spool/slurmd
-sudo chmod 755 /var/spool/slurmctld /var/spool/slurmd /var/log/slurm
+bash setup.sh
+```
 
-# 3. Verify hardware as SLURM sees it, and compare to slurm.conf
-sudo slurmd -C
-#    -> adjust RealMemory in slurm.conf if it differs from `slurmd -C` output.
+`setup.sh` is idempotent — safe to re-run. It handles package installation, directory creation, config deployment (with password substitution), munge key provisioning, MariaDB setup, daemon startup, and cluster registration in the correct order.
 
-# 4. Copy the config files into place
-#    setup.sh handles this automatically (including password substitution and
-#    epilog installation). To do it manually:
-sudo cp ./etc/slurm/slurm.conf   /etc/slurm/slurm.conf
-sudo cp ./etc/slurm/gres.conf    /etc/slurm/gres.conf
-sudo cp ./etc/slurm/cgroup.conf  /etc/slurm/cgroup.conf
-# slurmdbd.conf contains ${SLURM_DB_PASS} — substitute before copying:
-SLURM_DB_PASS="<your-password>" envsubst '$SLURM_DB_PASS' \
-    < ./etc/slurm/slurmdbd.conf \
-    | sudo install -m 0600 -o slurm -g slurm /dev/stdin /etc/slurm/slurmdbd.conf
-# GPU epilog (kills stray processes after each job):
-sudo install -m 0755 -o root -g root ./etc/slurm/epilog.sh /etc/slurm/epilog.sh
+After it completes:
 
-# 5. Provision the munge auth key (keep a backup — needed on every future node)
-sudo /usr/sbin/create-munge-key -f
-sudo chown munge:munge /etc/munge/munge.key
-sudo chmod 400         /etc/munge/munge.key
-sudo systemctl enable --now munge
-
-# 6. Create the accounting database (idempotent — safe to re-run)
-sudo systemctl enable --now mariadb
-sudo mysql <<EOF
-CREATE DATABASE IF NOT EXISTS slurm_acct_db;
-CREATE USER IF NOT EXISTS 'slurm'@'localhost' IDENTIFIED BY '$SLURM_DB_PASS';
-ALTER  USER               'slurm'@'localhost' IDENTIFIED BY '$SLURM_DB_PASS';
-GRANT ALL ON slurm_acct_db.* TO 'slurm'@'localhost';
-FLUSH PRIVILEGES;
-EOF
-# Set SLURM_DB_PASS in your environment (or use setup.sh which prompts for it)
-
-# 7. Make sure the node can resolve its own hostname
-getent hosts enif    # must return an IP; if not, add it to /etc/hosts
-
-# 8. Firewall: no ports need to be opened on a single-node cluster — all
-#    daemons talk over localhost. When adding a second node, open:
-#      6817/tcp (slurmctld) — all nodes must reach the controller
-#      6818/tcp (slurmd)    — restricted to cluster subnet
-#      6819/tcp (slurmdbd)  — restricted to controller only
-
-# 9. Start the daemons IN ORDER
-sudo systemctl enable --now slurmdbd     # accounting first
-# Wait for slurmdbd to be ready before starting slurmctld (see setup.sh)
-sudo systemctl enable --now slurmctld    # then the controller
-sudo systemctl enable --now slurmd       # then the worker
-
-# 10. Register the cluster + a default account in the accounting DB
-#     (|| true makes these idempotent on re-runs)
-sudo sacctmgr -i add cluster plast-hpc                                         || true
-sudo sacctmgr -i add account default Description="default" Organization="lab"  || true
-sudo sacctmgr -i add user "${SUDO_USER:-$USER}" DefaultAccount=default          || true
-
-# 11. Verify
-sinfo                       # node should be 'idle'
-scontrol show node enif    # check CPU/GPU/memory match
-srun -p gpu --gres=gpu:h100:1 nvidia-smi -L   # smoke test
+```bash
+sinfo                                        # node should be 'idle'
+scontrol show node enif                      # verify CPU/GPU/memory match slurm.conf
+srun -p gpu --gres=gpu:h100:1 nvidia-smi -L  # smoke test
 ```
 
 If `sinfo` shows the node as `down` or `drain`, run `sudo scontrol update nodename=enif state=resume` after fixing the cause (`scontrol show node enif` reports the reason).
+
+> **Note on `RealMemory`**: before running `setup.sh`, verify that the value in `slurm.conf` matches `sudo slurmd -C`. If `RealMemory` exceeds what slurmd reports, the node will be marked DOWN immediately.
+
+> **Firewall**: no ports need to be opened on a single-node cluster — all daemons communicate over localhost. When adding a second node, open `6817/tcp` (slurmctld, all nodes), `6818/tcp` (slurmd, cluster subnet only), and `6819/tcp` (slurmdbd, controller only).
 
 ---
 
@@ -91,7 +39,7 @@ A single-node SLURM cluster on **`enif`**: dual-socket server (2 × 16 physical 
 - **Respect hardware topology**: a job asking for 1 GPU gets CPU cores on the same socket; a 2-GPU job prefers the NVLink-connected pair.
 - **Enforce limits strictly**: jobs exceeding requested memory or touching unallocated GPUs are killed via Linux cgroups.
 - **Account everything**: every job's CPU/RAM/GPU usage is logged to MariaDB for reporting and future quota enforcement.
-- **Reserve OS headroom**: 2 cores and 12 GB RAM are kept off-limits to jobs.
+- **Reserve OS headroom**: 12 GB RAM is kept off-limits to jobs via `MemSpecLimit`.
 
 ## Config files at a glance
 
