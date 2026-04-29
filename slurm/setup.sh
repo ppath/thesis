@@ -67,10 +67,11 @@ EOF
 getent hosts enif \
     || echo "WARNING: 'enif' not in DNS or /etc/hosts — add it before starting daemons."
 
-# 8. Open firewall ports (only slurmctld needs external access on a single-node
-#    cluster; add 6818/6819 restricted to cluster subnet when a second node is
-#    added).
-sudo ufw allow 6817/tcp 2>/dev/null || true
+# 8. Firewall: no ports need to be opened on a single-node cluster — all
+#    daemons talk over localhost. When adding a second node, open:
+#      6817/tcp (slurmctld) — all nodes must reach the controller
+#      6818/tcp (slurmd)    — restricted to cluster subnet
+#      6819/tcp (slurmdbd)  — restricted to controller only
 
 # 9. Start the daemons IN ORDER
 sudo systemctl enable --now slurmdbd     # accounting first
