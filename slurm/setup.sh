@@ -14,10 +14,18 @@ sudo slurmd -C
 #    -> adjust RealMemory in slurm.conf if it differs from `slurmd -C` output.
 
 # 4. Copy the four config files into place
+#    Read the DB password once here; it's substituted into slurmdbd.conf and
+#    used in the CREATE USER statement below (step 6).
+if [ -z "${SLURM_DB_PASS:-}" ]; then
+    read -r -s -p "Enter slurm DB password: " SLURM_DB_PASS
+    echo
+fi
+
 sudo cp ./etc/slurm/slurm.conf      /etc/slurm/slurm.conf
 sudo cp ./etc/slurm/gres.conf       /etc/slurm/gres.conf
 sudo cp ./etc/slurm/cgroup.conf     /etc/slurm/cgroup.conf
 sudo cp ./etc/slurm/slurmdbd.conf   /etc/slurm/slurmdbd.conf
+sudo sed -i "s/__SLURM_DB_PASS__/${SLURM_DB_PASS}/g" /etc/slurm/slurmdbd.conf
 sudo chown slurm:slurm  /etc/slurm/slurmdbd.conf
 sudo chmod 600          /etc/slurm/slurmdbd.conf   # required by slurmdbd
 
@@ -31,7 +39,7 @@ sudo systemctl enable --now munge
 sudo systemctl enable --now mariadb
 sudo mysql <<EOF
 CREATE DATABASE slurm_acct_db;
-CREATE USER 'slurm'@'localhost' IDENTIFIED BY 'CHANGE_ME_STRONG_PASSWORD';
+CREATE USER 'slurm'@'localhost' IDENTIFIED BY '${SLURM_DB_PASS}';
 GRANT ALL ON slurm_acct_db.* TO 'slurm'@'localhost';
 FLUSH PRIVILEGES;
 EOF
@@ -52,7 +60,7 @@ sudo systemctl enable --now slurmd       # then the worker
 # 10. Register the cluster + a default account in the accounting DB
 sudo sacctmgr -i add cluster plast-hpc
 sudo sacctmgr -i add account default Description="default" Organization="lab"
-sudo sacctmgr -i add user "$USER" DefaultAccount=default
+sudo sacctmgr -i add user "${SUDO_USER:-$USER}" DefaultAccount=default
 
 # 11. Verify
 sinfo                       # node should be 'idle'
