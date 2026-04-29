@@ -16,9 +16,9 @@ bash setup.sh
 After it completes:
 
 ```bash
-sinfo                                        # node should be 'idle'
-scontrol show node enif                      # verify CPU/GPU/memory match slurm.conf
-srun -p gpu --gres=gpu:h100:1 nvidia-smi -L  # smoke test
+sinfo                                         # node should be 'idle'
+scontrol show node enif                       # verify CPU/GPU/memory match slurm.conf
+srun -p main --gres=gpu:h100:1 nvidia-smi -L  # smoke test
 ```
 
 If `sinfo` shows the node as `down` or `drain`, run `sudo scontrol update nodename=enif state=resume` after fixing the cause (`scontrol show node enif` reports the reason).
@@ -41,11 +41,25 @@ A single-node SLURM cluster on **`enif`**: dual-socket server (2 × 16 physical 
 - **Account everything**: every job's CPU/RAM/GPU usage is logged to MariaDB for reporting and future quota enforcement.
 - **Reserve OS headroom**: 12 GB RAM is kept off-limits to jobs via `MemSpecLimit`.
 
+## Direct SSH access (important caveat)
+
+`enif` remains a normal multi-user host. Users may continue to `ssh enif` and
+work outside SLURM as before. **SLURM's cgroup limits only apply to processes
+started through `srun`/`sbatch`** — anything you launch from a plain SSH shell
+runs outside any job cgroup, with no CPU, memory, or GPU isolation, and is
+not visible to `squeue`/`sacct`. We are intentionally not deploying
+`pam_slurm_adopt` (which would adopt SSH sessions into a running job's
+cgroup, or refuse login if the user has no job).
+
+If you need fair-share or accounting for a piece of work, submit it as a
+SLURM job. If you need a quick interactive shell that *is* sandboxed, use
+`srun -p main --pty bash`.
+
 ## Config files at a glance
 
 | File | Role |
 |---|---|
-| `/etc/slurm/slurm.conf` | Main config: cluster identity, controller host, node hardware, the `gpu` partition, scheduler (`backfill` + `cons_tres`), cgroup process tracking, and slurmdbd accounting. |
+| `/etc/slurm/slurm.conf` | Main config: cluster identity, controller host, node hardware, the single `main` partition, scheduler (`backfill` + `cons_tres`), cgroup process tracking, and slurmdbd accounting. |
 | `/etc/slurm/gres.conf` | Describes the 4 H100s and their 40 shards, binds each GPU to its NUMA-local cores, and declares NVLink topology. |
 | `/etc/slurm/cgroup.conf` | Enforces per-job limits on cores, RAM, swap, and GPU devices via Linux cgroups. |
 | `/etc/slurm/slurmdbd.conf` | Accounting daemon + MariaDB backend. Must be mode `0600`, owned by `slurm`. |
@@ -59,10 +73,16 @@ A single-node SLURM cluster on **`enif`**: dual-socket server (2 × 16 physical 
 
 ## How users submit jobs
 
+`main` is the only partition and is the default, so `-p main` is optional. A
+bare `--gres=gpu:h100:1` automatically gets 8 cores and 64 GB RAM
+(`DefCpuPerGPU` / `DefMemPerGPU` in `slurm.conf`); pass `-c` and `--mem`
+explicitly if you want different sizing.
+
 ```bash
-sbatch -p gpu --gres=gpu:h100:1  -c 8  --mem=64G   job.sh   # 1 whole GPU
-sbatch -p gpu --gres=gpu:h100:2  -c 16 --mem=128G  job.sh   # NVLink pair
-sbatch -p gpu --gres=shard:h100:3 -c 4 --mem=32G   job.sh   # share a GPU
+sbatch --gres=gpu:h100:1                    job.sh   # 1 whole GPU, 8 c / 64G defaults
+sbatch --gres=gpu:h100:2  -c 16 --mem=128G  job.sh   # NVLink pair, explicit sizes
+sbatch --gres=shard:h100:3 -c 4 --mem=32G   job.sh   # share a GPU
+sbatch -c 8 --mem=32G                       job.sh   # CPU-only (no --gres)
 squeue          # current queue
 sacct -X        # job history (from accounting DB)
 ```
@@ -79,17 +99,24 @@ sinfo -R                                # why is a node down/drained?
 
 ## Adding a second node later
 
-1. Install `slurm-wlm` + `munge` on the new host.
+`slurm.conf` already sets `SlurmctldParameters=enable_configless`, so the new
+node's `slurmd` can fetch `slurm.conf` and `cgroup.conf` from the controller
+at startup — you don't need to copy them.
+
+1. Install `slurm-wlm` + `munge` on the new host (NVIDIA stack already in place).
 2. Copy `/etc/munge/munge.key` from `enif` (same permissions: `munge:munge 400`).
-3. Copy `/etc/slurm/slurm.conf` and `/etc/slurm/cgroup.conf` (must be **identical** on every node).
-4. Place a `gres.conf` matching the new node's own GPU topology.
-5. Ensure both hosts resolve each other (`/etc/hosts` or DNS).
-6. Append a `NodeName=` line and add the new node to `Nodes=` in the `gpu` partition of `slurm.conf` on **all** nodes.
-7. On the controller: `sudo scontrol reconfigure`. On the new node: `sudo systemctl enable --now slurmd`.
+3. Place a node-local `/etc/slurm/gres.conf` matching the new node's own GPU topology.
+   `cgroup.conf` is per-node and `slurm.conf` is fetched from the controller — neither needs copying.
+4. Ensure both hosts resolve each other (`/etc/hosts` or DNS).
+5. On the **controller**: append a `NodeName=<new>` line and add the new node to `Nodes=` in the `main` partition of `slurm.conf`, then `sudo scontrol reconfigure`.
+6. On the **new node**: `sudo systemctl enable --now slurmd` with the unit configured to start with `--conf-server=enif:6817` (Ubuntu's default unit reads `/etc/default/slurmd`; add `SLURMD_OPTIONS="--conf-server=enif:6817"`).
+7. Open the firewall on the new node: 6817/tcp outbound to `enif`, 6818/tcp inbound from the cluster subnet.
 
 ## Troubleshooting checklist
 
 - **Node `down`/`drain`**: `scontrol show node enif` shows the reason; common causes are `RealMemory` mismatch with `slurmd -C`, or `gres.conf` listing a `/dev/nvidiaN` that doesn't exist.
 - **Jobs stuck in `PD` (pending)**: `squeue --start` and `scontrol show job <id>` give the reason (resources, priority, association missing).
-- **`Invalid account`**: the user wasn't added with `sacctmgr` — required because we set `AccountingStorageEnforce=associations`.
+- **`Invalid account`**: the user wasn't added with `sacctmgr` — required because we set `AccountingStorageEnforce=associations,limits,qos` (strict from day one). Add with `sudo sacctmgr -i add user <name> DefaultAccount=default`.
 - **`slurmdbd` won't start**: check that `slurmdbd.conf` is mode `0600`, owned by `slurm`, and that MariaDB is reachable with the configured password.
+
+> **Note on MariaDB**: `setup.sh` leaves MariaDB at Ubuntu's default — root via unix_socket, slurm user reachable only on `localhost`, no network listener exposed externally. Review and harden (`bind-address`, root password, TLS) before pointing a future second node at this DBD over the network.

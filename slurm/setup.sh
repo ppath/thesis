@@ -1,6 +1,29 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# 0. Preflight: NVIDIA stack must already be installed.
+#    We deliberately do NOT install drivers here — driver/CUDA installs are
+#    too varied (DKMS, runfile, datacenter repo) for a generic apt line. Fail
+#    fast with a hint instead.
+preflight_fail() {
+    echo "ERROR: $1" >&2
+    echo "       fix:    $2" >&2
+    exit 1
+}
+command -v nvidia-smi >/dev/null \
+    || preflight_fail "nvidia-smi not found" \
+       "sudo apt install nvidia-utils-550-server (or matching driver series)"
+nvidia-smi -L 2>/dev/null | grep -q . \
+    || preflight_fail "nvidia-smi -L lists no GPUs (driver not loaded?)" \
+       "check 'sudo dmesg | grep -i nvidia' and reboot after driver install"
+ldconfig -p | grep -q libnvidia-ml \
+    || preflight_fail "libnvidia-ml not found (NVML; needed for AutoDetect=nvml)" \
+       "sudo apt install libnvidia-ml1 (or nvidia-utils-XXX-server)"
+systemctl is-active --quiet nvidia-persistenced \
+    || echo "WARN: nvidia-persistenced is not active — first job per GPU will" \
+            "pay a driver-init cost. enable with 'sudo systemctl enable --now" \
+            "nvidia-persistenced'." >&2
+
 # 1. Install packages (Ubuntu 22.04+; for RHEL use dnf equivalents)
 sudo apt update
 sudo apt install -y slurm-wlm slurmdbd munge slurm-wlm-basic-plugins \
@@ -15,11 +38,7 @@ sudo chown -R root:root   /var/spool/slurmd
 sudo chmod 755 /var/spool/slurmctld /var/spool/slurmd /var/log/slurm
 sudo chmod 750 /var/spool/slurm/archive
 
-# 3. Verify hardware as SLURM sees it, and compare to slurm.conf
-sudo slurmd -C
-#    -> adjust RealMemory in slurm.conf if it differs from `slurmd -C` output.
-
-# 4. Copy the config files into place.
+# 3. Copy the config files into place.
 #    Read the DB password once here; it is substituted into slurmdbd.conf via
 #    envsubst (never exposed in argv) and used in the CREATE USER statement
 #    in step 6.
@@ -43,6 +62,18 @@ rm -f "$tmp"
 # GPU epilog: runs after every job to kill stray compute processes
 sudo install -m 0755 -o root -g root \
     ./etc/slurm/epilog.sh /etc/slurm/epilog.sh
+
+# Logrotate for /var/log/slurm/*.log (slurmctld, slurmd, slurmdbd, epilog)
+sudo install -m 0644 -o root -g root \
+    ./etc/logrotate.d/slurm /etc/logrotate.d/slurm
+
+# 4. Verify hardware as SLURM sees it, and compare to slurm.conf.
+#    (slurmd -C reads /etc/slurm/slurm.conf, so this MUST run after the
+#    config copy above.) Adjust RealMemory/CPUs in slurm.conf to match if
+#    the values differ.
+echo "---- slurmd -C output (compare with NodeName= line in slurm.conf) ----"
+sudo slurmd -C
+echo "---- end slurmd -C ----"
 
 # 5. Provision the munge auth key (keep a backup — needed on every future node)
 #    Guard: do not overwrite an existing key on re-runs (would break auth).
@@ -102,4 +133,18 @@ sudo sacctmgr -i add user "${SUDO_USER:-$USER}" DefaultAccount=default          
 # 11. Verify
 sinfo                                          # node should be 'idle'
 scontrol show node enif                        # check CPU/GPU/memory match
-srun -p gpu --gres=gpu:h100:1 nvidia-smi -L   # smoke test
+
+# Wait for the node to reach 'idle' before submitting the smoke test;
+# slurmd registration with slurmctld can take a few seconds after boot.
+for _ in $(seq 1 30); do
+    state=$(sinfo -h -o '%T' -n enif | head -n1 || true)
+    [[ "$state" == "idle" ]] && break
+    sleep 1
+done
+if [[ "${state:-}" != "idle" ]]; then
+    echo "WARN: node did not reach 'idle' within 30 s (state=$state)." \
+         "Check 'sinfo -R' and 'journalctl -u slurmd'. Skipping smoke test." >&2
+    exit 0
+fi
+
+srun -p main --gres=gpu:h100:1 nvidia-smi -L  # smoke test
